@@ -1,1 +1,1 @@
-with st.expander("✏️ 修改甜點資訊"):
+                        event_title = f"📋訂單：{row['product_name']}({order_qty}{unit_str})"
