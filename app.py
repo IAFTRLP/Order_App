@@ -9,6 +9,48 @@ from streamlit_calendar import calendar
 conn = sqlite3.connect('dessert_final.db')
 c = conn.cursor()
 
+# 🌟 雲端全新啟動：自動建立所有必要的資料表
+c.execute("""
+CREATE TABLE IF NOT EXISTS Products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    price REAL DEFAULT 0.0,
+    prep_days INTEGER DEFAULT 0,
+    batch_yield INTEGER DEFAULT 1,
+    labor_cost REAL DEFAULT 0.0,
+    production_minutes INTEGER DEFAULT 0,
+    production_hours REAL DEFAULT 0.0,
+    production_hours_2 REAL DEFAULT 0.0,
+    production_hours_3 REAL DEFAULT 0.0,
+    overhead_cost REAL DEFAULT 0.0,
+    overhead_cost_2 REAL DEFAULT 0.0,
+    overhead_cost_3 REAL DEFAULT 0.0,
+    hourly_wage REAL DEFAULT 183.0,
+    packaging_cost REAL DEFAULT 0.0
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS Ingredients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    unit TEXT,
+    unit_price REAL DEFAULT 0.0
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS Product_BOM (
+    product_id INTEGER,
+    ingredient_id INTEGER,
+    required_quantity REAL DEFAULT 0.0,
+    PRIMARY KEY (product_id, ingredient_id),
+    FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE,
+    FOREIGN KEY (ingredient_id) REFERENCES Ingredients(id) ON DELETE CASCADE
+)
+""")
+conn.commit()
+
 # 自動建立所有需要的資料表
 c.execute('''CREATE TABLE IF NOT EXISTS Ingredients
              (id INTEGER PRIMARY KEY AUTOINCREMENT, 
