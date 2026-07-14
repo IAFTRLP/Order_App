@@ -566,21 +566,41 @@ if page == "配方設定":
                             edit_bom_key = f"edit_bom_active_{current_p_id}_{row['ing_id']}"
                             if edit_bom_key not in st.session_state:
                                 st.session_state[edit_bom_key] = False
-                                
-                            if not st.session_state[edit_bom_key]:
-                                if st.button("✏️ 修改", key=f"btn_bom_open_{row['ing_id']}", use_container_width=True):
-                                    st.session_state[edit_bom_key] = True
+                            
+                            # 🌟 關鍵魔法：注入網頁樣式，強制讓小按鈕在手機版畫面上也不換行（保持水平排列）
+                            st.markdown("""
+                                <style>
+                                /* 鎖定欄位內的巢狀欄位，在窄螢幕下維持橫向排列並縮小間距 */
+                                div[data-testid="stColumn"] div[data-testid="stHorizontalBlock"] {
+                                    flex-direction: row !important;
+                                    flex-wrap: nowrap !important;
+                                    gap: 6px !important;
+                                }
+                                div[data-testid="stColumn"] div[data-testid="stHorizontalBlock"] div[data-testid="stColumn"] {
+                                    min-width: 0px !important;
+                                }
+                                </style>
+                            """, unsafe_allow_html=True)
+                            
+                            # 建立兩個子欄位
+                            c_edit_btn, c_del_btn = st.columns(2)
+                            
+                            with c_edit_btn:
+                                if not st.session_state[edit_bom_key]:
+                                    if st.button("✏️ 修改", key=f"btn_bom_open_{row['ing_id']}", use_container_width=True):
+                                        st.session_state[edit_bom_key] = True
+                                        st.rerun()
+                                else:
+                                    if st.button("❌ 取消", key=f"btn_bom_close_{row['ing_id']}", use_container_width=True):
+                                        st.session_state[edit_bom_key] = False
+                                        st.rerun()
+                                        
+                            with c_del_btn:
+                                if st.button("🗑️ 刪除", key=f"bdel_{row['ing_id']}", use_container_width=True):
+                                    c.execute("DELETE FROM Product_BOM WHERE product_id=? AND ingredient_id=?", (current_p_id, int(row['ing_id'])))
+                                    conn.commit()
+                                    st.toast("🗑️ 配方已刪除！")
                                     st.rerun()
-                            else:
-                                if st.button("❌ 取消", key=f"btn_bom_close_{row['ing_id']}", use_container_width=True):
-                                    st.session_state[edit_bom_key] = False
-                                    st.rerun()
-                                    
-                            if st.button("🗑️ 刪除", key=f"bdel_{row['ing_id']}", use_container_width=True):
-                                c.execute("DELETE FROM Product_BOM WHERE product_id=? AND ingredient_id=?", (current_p_id, int(row['ing_id'])))
-                                conn.commit()
-                                st.toast("🗑️ 配方已刪除！")
-                                st.rerun()
                         
                         if st.session_state[edit_bom_key]:
                             with st.form(f"edit_bom_form_{row['ing_id']}"):
@@ -610,8 +630,35 @@ if page == "配方設定":
 
 # ===== 頁面 4：成本分析 (輸入成本與檢視) =====
 if page == "成本分析":
-    st.subheader("💰 成本設定與利潤分析")
+    # 🌟 萬用自我修復防禦機制：放在最前面！確保一進入此頁面，資料庫欄位絕對齊全，任何頁籤都不會閃退
+    required_columns = {
+        "hourly_wage": "REAL DEFAULT 183.0",
+        "packaging_cost": "REAL DEFAULT 0.0",
+        "production_hours": "REAL DEFAULT 0.0",
+        "overhead_cost": "REAL DEFAULT 0.0",
+        "production_hours_2": "REAL DEFAULT 0.0",
+        "overhead_cost_2": "REAL DEFAULT 0.0",
+        "production_hours_3": "REAL DEFAULT 0.0",
+        "overhead_cost_3": "REAL DEFAULT 0.0"
+    }
     
+    c_check = conn.cursor()
+    c_check.execute("PRAGMA table_info(Products)")
+    existing_cols = [r[1] for r in c_check.fetchall()]
+    
+    db_changed = False
+    for col_name, col_type in required_columns.items():
+        if col_name not in existing_cols:
+            try:
+                c_check.execute(f'ALTER TABLE Products ADD COLUMN "{col_name}" {col_type}')
+                db_changed = True
+            except sqlite3.OperationalError:
+                pass
+    
+    if db_changed:
+        conn.commit()
+        st.rerun()  # 補齊欄位後立即重整，確保下方所有 tabs 正常載入
+
     tab_ing_cost, tab_other_cost, tab_profit = st.tabs(["🛒 原物料單價設定", "📦 包材與雜支設定", "📊 利潤試算預覽"])
     
     # ─── 頁籤 1：設定原物料單價 ───
@@ -682,12 +729,112 @@ if page == "成本分析":
     # ─── 頁籤 2：設定甜點附加成本 (包材、雜支、時間與自訂) ───
     with tab_other_cost:
         st.markdown("### 📦 附加成本與時間設定")
-        st.markdown("您可以輸入**時薪**與**製作整批所需的時間 (小時)**，系統會自動為您換算單份人事成本。也可以新增您的專屬成本項目。")
+        st.markdown("請選擇甜點品項，並設定 1 份、2 份、3 份的製作時間與費用。系統會自動記憶！")       
         
-        with st.expander("➕ 新增自訂成本項目 (例如：貼紙、緞帶、平台手續費)", expanded=False):
+        # 1. 獲取所有甜點
+        df_prods_all = pd.read_sql_query("SELECT * FROM Products", conn)
+        
+        if df_prods_all.empty:
+            st.warning("目前沒有甜點品項，請先到「配方設定」新增！")
+        else:
+            # 手機超友善：用下拉選單挑選你要修改的甜點
+            prod_names = df_prods_all['name'].tolist()
+            selected_prod_name = st.selectbox("🎯 請選擇要設定的甜點", prod_names, key="edit_cost_prod_select")
+            
+            # 取得該甜點目前的資料庫數據
+            prod_row = df_prods_all[df_prods_all['name'] == selected_prod_name].iloc[0]
+            
+            # 手機專屬直式表單：點擊輸入框就能直接打字修改
+            with st.form(f"form_other_cost_{prod_row['id']}"):
+                st.markdown(f"#### ✏️ 調整【{selected_prod_name}】的設定")
+                
+                # 基本費用設定 (時薪與包材)
+                c_wage, c_pack = st.columns(2)
+                with c_wage:
+                    # 使用 get() 加上預設值，保證安全不報錯
+                    val_hourly_wage = float(prod_row.get('hourly_wage', 183.0)) if pd.notna(prod_row.get('hourly_wage', 183.0)) else 183.0
+                    new_hourly_wage = st.number_input("基本時薪 ($/時)", min_value=0.0, value=val_hourly_wage, step=5.0)
+                with c_pack:
+                    val_pack = float(prod_row.get('packaging_cost', 0.0)) if pd.notna(prod_row.get('packaging_cost', 0.0)) else 0.0
+                    new_packaging_cost = st.number_input("單份包材費 ($/份)", min_value=0.0, value=val_pack, step=1.0)
+                
+                st.write("---")
+                st.markdown("##### ⏱️ 製作時間與水電雜支設定 (核心對照組)")
+                
+                # 1 份設定
+                st.markdown("**➡️ 製作 1 份配方：**")
+                c_h1, c_o1 = st.columns(2)
+                with c_h1:
+                    val_h1 = float(prod_row.get('production_hours', 0.0)) if pd.notna(prod_row.get('production_hours', 0.0)) else 0.0
+                    new_h1 = st.number_input("製作時間 (1份) (小時)", min_value=0.0, value=val_h1, step=0.5, key="h1")
+                with c_o1:
+                    val_o1 = float(prod_row.get('overhead_cost', 0.0)) if pd.notna(prod_row.get('overhead_cost', 0.0)) else 0.0
+                    new_o1 = st.number_input("水電雜支 (1份) ($)", min_value=0.0, value=val_o1, step=5.0, key="o1")
+                
+                # 2 份設定
+                st.markdown("**➡️ 製作 2 份配方 (可聯烤省時省電)：**")
+                c_h2, c_o2 = st.columns(2)
+                with c_h2:
+                    val_h2 = float(prod_row.get('production_hours_2', 0.0)) if pd.notna(prod_row.get('production_hours_2', 0.0)) else 0.0
+                    new_h2 = st.number_input("製作時間 (2份) (小時)", min_value=0.0, value=val_h2, step=0.5, key="h2")
+                with c_o2:
+                    val_o2 = float(prod_row.get('overhead_cost_2', 0.0)) if pd.notna(prod_row.get('overhead_cost_2', 0.0)) else 0.0
+                    new_o2 = st.number_input("水電雜支 (2份) ($)", min_value=0.0, value=val_o2, step=5.0, key="o2")
+                
+                # 3 份設定
+                st.markdown("**➡️ 製作 3 份配方 (最大產能攤提)：**")
+                c_h3, c_o3 = st.columns(2)
+                with c_h3:
+                    val_h3 = float(prod_row.get('production_hours_3', 0.0)) if pd.notna(prod_row.get('production_hours_3', 0.0)) else 0.0
+                    new_h3 = st.number_input("製作時間 (3份) (小時)", min_value=0.0, value=val_h3, step=0.5, key="h3")
+                with c_o3:
+                    val_o3 = float(prod_row.get('overhead_cost_3', 0.0)) if pd.notna(prod_row.get('overhead_cost_3', 0.0)) else 0.0
+                    new_o3 = st.number_input("水電雜支 (3份) ($)", min_value=0.0, value=val_o3, step=5.0, key="o3")
+                
+                # 自動辨識是否有「自訂項目」(如：貼紙、緞帶、平台抽成)
+                ignored_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3', 'hourly_wage', 'packaging_cost']
+                custom_cols = [col for col in df_prods_all.columns if col not in ignored_cols]
+                
+                new_custom_values = {}
+                if custom_cols:
+                    st.write("---")
+                    st.markdown("##### 🏷️ 其他自訂附加項目")
+                    for i in range(0, len(custom_cols), 2):
+                        cols = st.columns(2)
+                        for j in range(2):
+                            if i + j < len(custom_cols):
+                                col_name = custom_cols[i+j]
+                                val_custom = float(prod_row.get(col_name, 0.0)) if pd.notna(prod_row.get(col_name, 0.0)) else 0.0
+                                with cols[j]:
+                                    new_custom_values[col_name] = st.number_input(f"{col_name} ($/份)", min_value=0.0, value=val_custom, step=1.0)
+                
+                st.write("")
+                if st.form_submit_button("💾 儲存此甜點的所有成本與時間設定", use_container_width=True):
+                    update_fields = {
+                        "hourly_wage": new_hourly_wage,
+                        "packaging_cost": new_packaging_cost,
+                        "production_hours": new_h1,
+                        "overhead_cost": new_o1,
+                        "production_hours_2": new_h2,
+                        "overhead_cost_2": new_o2,
+                        "production_hours_3": new_h3,
+                        "overhead_cost_3": new_o3
+                    }
+                    update_fields.update(new_custom_values)
+                    
+                    set_clauses = ", ".join([f'"{k}"=?' for k in update_fields.keys()])
+                    values = list(update_fields.values()) + [int(prod_row['id'])]
+                    
+                    c.execute(f"UPDATE Products SET {set_clauses} WHERE id=?", values)
+                    conn.commit()
+                    st.toast(f"✅ 【{selected_prod_name}】所有設定已成功儲存！", icon="💾")
+                    st.rerun()
+
+        st.write("---")
+        with st.expander("➕ 新增自訂成本項目 (例如：貼紙、緞帶)", expanded=False):
             col_new_name, col_new_btn = st.columns([3, 1])
             with col_new_name:
-                new_cost_name = st.text_input("輸入新成本名稱", label_visibility="collapsed", placeholder="請輸入項目名稱，例如：緞帶")
+                new_cost_name = st.text_input("輸入新成本名稱", label_visibility="collapsed", placeholder="請輸入項目名稱，例如：貼紙")
             with col_new_btn:
                 if st.button("新增項目", use_container_width=True):
                     if new_cost_name:
@@ -700,125 +847,90 @@ if page == "成本分析":
                         except sqlite3.OperationalError:
                             st.error("⚠️ 此項目可能已經存在！")
 
+    # ─── 頁籤 3：利潤試算預覽與多份數精算 ───
+    with tab_profit:
+        st.markdown("### 📊 甜點成本與利潤總覽")
+        
+        # 抓取 Products 表的所有欄位結構
         df_prods_all = pd.read_sql_query("SELECT * FROM Products", conn)
         
         if df_prods_all.empty:
             st.warning("目前沒有甜點品項，請先到「配方設定」新增！")
         else:
-            # 🌟 隱藏退休的欄位
-            ignored_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes']
-            editable_cols = [col for col in df_prods_all.columns if col not in ignored_cols]
+            # 🌟 智慧分類：精準定義系統與整批計算欄位，避免誤歸類為單份固定成本
+            base_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes']
+            batch_calc_cols = ['hourly_wage', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3']
             
-            col_name_mapping = {
-                "packaging_cost": "包材費 ($/份)",
-                "overhead_cost": "水電雜支 ($/份)",
-                "hourly_wage": "時薪 ($/時)",
-                "production_hours": "製作整批時間 (小時)"
-            }
+            # 自動辨識真正的「每份固定成本」欄位 (如：包材費，以及您未來手動新增的貼紙、緞帶等自訂欄位)
+            per_unit_cost_cols = [col for col in df_prods_all.columns if col not in base_cols + batch_calc_cols]
             
-            col_config = {
-                "id": None,
-                "name": st.column_config.TextColumn("甜點名稱", disabled=True)
-            }
+            # 使用 LEFT JOIN 抓取甜點、配方與食材的完整關聯資料
+            profit_query = """
+            SELECT 
+                p.*,
+                b.required_quantity,
+                i.name AS ing_name,
+                i.unit_price,
+                i.unit AS ing_unit
+            FROM Products p
+            LEFT JOIN Product_BOM b ON p.id = b.product_id
+            LEFT JOIN Ingredients i ON b.ingredient_id = i.id
+            """
+            df_raw = pd.read_sql_query(profit_query, conn)
             
-            for col in editable_cols:
-                if col == "hourly_wage":
-                    display_name = col_name_mapping.get(col)
-                    col_config[col] = st.column_config.NumberColumn(display_name, min_value=0.0, step=5.0)
-                elif col == "production_hours":
-                    # 🌟 允許小數點輸入，例如 1.5 小時
-                    display_name = col_name_mapping.get(col)
-                    col_config[col] = st.column_config.NumberColumn(display_name, min_value=0.0, format="%.1f", step=0.5)
-                else:
-                    display_name = col_name_mapping.get(col, f"{col} ($/份)")
-                    col_config[col] = st.column_config.NumberColumn(display_name, min_value=0.0, format="$ %.1f", step=1.0)
-                
-            with st.form("update_other_cost_form"):
-                edited_df_prods = st.data_editor(
-                    df_prods_all[['id', 'name'] + editable_cols],
-                    column_config=col_config,
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                if st.form_submit_button("💾 儲存所有設定", use_container_width=True):
-                    for _, row in edited_df_prods.iterrows():
-                        set_clauses = ", ".join([f'"{col}"=?' for col in editable_cols])
-                        values = [row[col] for col in editable_cols] + [row['id']]
-                        c.execute(f"UPDATE Products SET {set_clauses} WHERE id=?", values)
-                    conn.commit()
-                    st.toast("✅ 附加成本與時間設定已全面更新！", icon="📦")
-                    st.rerun()
-
-    # ─── 頁籤 3：利潤試算預覽與批量計算 ───
-    with tab_profit:
-        st.markdown("### 📊 甜點成本與利潤總覽")
-        
-        df_prods_all = pd.read_sql_query("SELECT * FROM Products", conn)
-        # 🌟 整理要忽略的系統欄位
-        ignored_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'hourly_wage', 'production_minutes', 'production_hours']
-        extra_cost_cols = [col for col in df_prods_all.columns if col not in ignored_cols]
-        
-        col_name_mapping = {
-            "packaging_cost": "包材費",
-            "overhead_cost": "水電雜支"
-        }
-        
-        profit_query = """
-        SELECT 
-            p.*,
-            b.required_quantity,
-            i.name AS ing_name,
-            i.unit_price,
-            i.unit AS ing_unit
-        FROM Products p
-        LEFT JOIN Product_BOM b ON p.id = b.product_id
-        LEFT JOIN Ingredients i ON b.ingredient_id = i.id
-        """
-        df_raw = pd.read_sql_query(profit_query, conn)
-        
-        if df_raw.empty:
-            st.warning("目前沒有甜點品項，請先到「配方設定」新增！")
-        else:
-            # 確保數字格式正確
-            for col in extra_cost_cols + ['hourly_wage', 'production_hours', 'batch_yield', 'price']:
+            # 強制轉換所有成本相關欄位為數字格式，防止空白或 None 報錯
+            all_numeric_cols = ['price', 'batch_yield', 'hourly_wage', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3'] + per_unit_cost_cols
+            for col in all_numeric_cols:
                 if col in df_raw.columns:
                     df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
-                
+            
+            # 計算每項原料在配方中的總花費
             df_raw['ing_total_cost'] = df_raw['required_quantity'] * df_raw['unit_price']
             df_raw['ing_total_cost'] = df_raw['ing_total_cost'].fillna(0.0)
             
-            # 🌟 核心計算改為：製作時間(小時) * 時薪 = 製作整批的勞務總成本
-            df_raw['勞務總成本/批'] = df_raw['production_hours'] * df_raw['hourly_wage']
+            # 依照產品的所有欄位進行分組，加總原物料成本
+            group_keys = [col for col in df_prods_all.columns if col not in ['labor_cost', 'production_minutes']]
+            df_product_ing = df_raw.groupby(group_keys)['ing_total_cost'].sum().reset_index()
             
-            group_cols = ['id', 'name', 'price', 'batch_yield', '勞務總成本/批', 'hourly_wage', 'production_hours'] + extra_cost_cols
-            df_product_ing = df_raw.groupby(group_cols)['ing_total_cost'].sum().reset_index()
+            # ─── 💡 基礎（製作 1 份配方）的單個成本精算 ───
+            # 1. 加總每份固定的附加成本
+            df_product_ing['單份包材與附加總和'] = df_product_ing[per_unit_cost_cols].sum(axis=1)
             
-            # 分攤為「單份成本」
-            df_product_ing['人事成本/份'] = (df_product_ing['勞務總成本/批'] / df_product_ing['batch_yield']).round(1)
-            df_product_ing['其他附加成本總和/份'] = df_product_ing[extra_cost_cols].sum(axis=1).round(1)
-            df_product_ing['原物料成本/份'] = (df_product_ing['ing_total_cost'] / df_product_ing['batch_yield']).round(1)
+            # 2. 食材單份攤提 = 食材總價 / 產出量
+            df_product_ing['原物料成本/份'] = (df_product_ing['ing_total_cost'] / df_product_ing['batch_yield']).fillna(0.0)
             
-            # 總成本 = 原物料 + 人事 + 其他附加
-            df_product_ing['總成本/份'] = (df_product_ing['原物料成本/份'] + df_product_ing['人事成本/份'] + df_product_ing['其他附加成本總和/份']).round(1)
+            # 3. 人事單份攤提 = (1份小時 * 時薪) / 產出量
+            df_product_ing['人事成本/份'] = ((df_product_ing['production_hours'] * df_product_ing['hourly_wage']) / df_product_ing['batch_yield']).fillna(0.0)
+            
+            # 4. 水電單份攤提 = 1份水電總額 / 產出量
+            df_product_ing['水電折舊/份'] = (df_product_ing['overhead_cost'] / df_product_ing['batch_yield']).fillna(0.0)
+            
+            # 總成本/份 = 原物料 + 人事 + 水電 + 每份固定附加
+            df_product_ing['總成本/份'] = df_product_ing['原物料成本/份'] + df_product_ing['人事成本/份'] + df_product_ing['水電折舊/份'] + df_product_ing['單份包材與附加總和']
+            
+            # 修飾四捨五入顯示
+            df_product_ing['原物料成本/份'] = df_product_ing['原物料成本/份'].round(1)
+            df_product_ing['人事成本/份'] = df_product_ing['人事成本/份'].round(1)
+            df_product_ing['其他附加總和/份'] = (df_product_ing['水電折舊/份'] + df_product_ing['單份包材與附加總和']).round(1)
+            df_product_ing['總成本/份'] = df_product_ing['總成本/份'].round(1)
             df_product_ing['預估毛利/份'] = (df_product_ing['price'] - df_product_ing['總成本/份']).round(1)
             
             df_product_ing['毛利率 (%)'] = df_product_ing.apply(
                 lambda x: round((x['預估毛利/份'] / x['price'] * 100), 1) if x['price'] > 0 else 0.0, axis=1
             )
             
-            # 顯示表格
-            df_display = df_product_ing[['name', 'price', '原物料成本/份', '人事成本/份', '其他附加成本總和/份', '總成本/份', '預估毛利/份', '毛利率 (%)']].rename(columns={'name': '甜點名稱', 'price': '建議售價 ($)'})
+            # 顯示主總覽表格 (呈現 1 份配方時的基準數據)
+            df_display = df_product_ing[['name', 'price', '原物料成本/份', '人事成本/份', '其他附加總和/份', '總成本/份', '預估毛利/份', '毛利率 (%)']].rename(columns={'name': '甜點名稱', 'price': '建議售價 ($)'})
             st.dataframe(df_display, use_container_width=True, hide_index=True)
             
+            # ─── 🎯 多份數定價與利潤精算區 ───
             st.write("---")
             st.markdown("### 🎯 多份數定價與利潤精算機")
-            st.caption("先在下方選擇甜點，並設定您的「目標毛利率」，系統會自動整理出製作 1 份、2 份、3 份配方的所有成本數據，並為您精算應賣售價！")
+            st.caption("選擇甜點並設定「目標毛利率」，系統會依據您在頁籤二設定的 1 ~ 3 份真實時間與電費，為您精算應賣售價與利潤變動！")
             
             distinct_products = [n for n in df_product_ing['name'].unique() if n is not None]
             
             if distinct_products:
-                # 欄位排版：左邊選甜點，右邊設定想達成的目標毛利率
                 c_sel, c_margin = st.columns(2)
                 with c_sel:
                     selected_prod = st.selectbox("🔍 1. 請選擇甜點品項", distinct_products, key="pricing_calc_prod")
@@ -828,34 +940,38 @@ if page == "成本分析":
                 prod_data = df_product_ing[df_product_ing['name'] == selected_prod].iloc[0]
                 base_yield = prod_data['batch_yield']
                 
-                # 用來收集 1, 2, 3 份所有數據的清單
                 pricing_rows = []
                 
+                # 依序精算 1 份、2 份、3 份的精確階梯成本
                 for batches in [1, 2, 3]:
                     total_items = int(base_yield * batches)
                     
-                    # 1. 計算各項總成本
-                    ing_cost = round(prod_data['ing_total_cost'] * batches, 1)
-                    labor_cost = round(prod_data['勞務總成本/批'] * batches, 1)
+                    # 智慧讀取，若為 0 則自動套用倍數做防呆機制
+                    if batches == 1:
+                        batch_hours = prod_data['production_hours']
+                        batch_overhead = prod_data['overhead_cost']
+                    elif batches == 2:
+                        batch_hours = prod_data['production_hours_2'] if prod_data['production_hours_2'] > 0 else prod_data['production_hours'] * 2
+                        batch_overhead = prod_data['overhead_cost_2'] if prod_data['overhead_cost_2'] > 0 else prod_data['overhead_cost'] * 2
+                    elif batches == 3:
+                        batch_hours = prod_data['production_hours_3'] if prod_data['production_hours_3'] > 0 else prod_data['production_hours'] * 3
+                        batch_overhead = prod_data['overhead_cost_3'] if prod_data['overhead_cost_3'] > 0 else prod_data['overhead_cost'] * 3
                     
-                    # 扣除原本的水電與包材，算出其他自訂附加成本，再乘以總產出
-                    other_extra_per_unit = prod_data['其他附加成本總和/份'] - prod_data['overhead_cost'] - prod_data['packaging_cost']
-                    total_other_extra = other_extra_per_unit * total_items
-                    extra_cost = round((prod_data['overhead_cost'] + prod_data['packaging_cost']) * total_items + total_other_extra, 1)
+                    # 1. 階梯總成本計算
+                    ing_cost = round(prod_data['ing_total_cost'] * batches, 1) # 食材呈線性增長
+                    labor_cost = round(batch_hours * prod_data['hourly_wage'], 1) # 人事依真實小時計算
                     
-                    # 總成本 = 食材 + 人事 + 附加
+                    # 附加總成本 = 真實批次水電總額 + (單份包材附加固定總和 * 總件量)
+                    extra_cost = round(batch_overhead + (prod_data['單份包材與附加總和'] * total_items), 1)
+                    
+                    # 本次總成本
                     total_cost = round(ing_cost + labor_cost + extra_cost, 1)
                     
-                    # 2. 根據目標毛利率核心公式計算【應賣多少錢】
-                    # 公式：應賣總營業額 = 總成本 / (1 - 目標毛利率%)
+                    # 2. 定價公式推算 (應賣金額 = 總成本 / (1 - 毛利率%))
                     suggested_total_revenue = round(total_cost / (1 - target_margin / 100), 0)
-                    # 單個應賣售價 = 總營業額 / 總產出數量
                     suggested_unit_price = round(suggested_total_revenue / total_items, 0) if total_items > 0 else 0
-                    
-                    # 3. 計算最後的總利潤
                     total_profit = round(suggested_total_revenue - total_cost, 0)
                     
-                    # 將這份的所有數據打包
                     pricing_rows.append({
                         "製作規模": f"製作 {batches} 份配方",
                         "預計總產出": f"{total_items} 個/份",
@@ -868,26 +984,9 @@ if page == "成本分析":
                         "預估最後總利潤 (B-A)": f"$ {int(total_profit)}"
                     })
                 
-                # 轉成 DataFrame 呈現
                 df_pricing = pd.DataFrame(pricing_rows)
                 
                 st.write("")
-                st.markdown(f"📊 **【 {selected_prod} 】1 ~ 3 份配方全數據定價對照表** (預期毛利率：{target_margin}%)")
-                
-                # 使用乾淨整齊的表格呈現所有數據
-                st.dataframe(
-                    df_pricing,
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                # 貼心小提示
-                st.caption(f"💡 商業小提醒：公式採用「 應賣總金額 = 總成本 ÷ (1 - {target_margin}%) 」。當製作份數增加時，若您有啟動上方的進階微調省下時間或電費，單個應賣售價通常會更具競爭力喔！")
-                
-                # 底下保留原有的詳細食材結構查看
-                with st.expander(f"🔍 查看 {selected_prod} 的基礎每份食材結構"):
-                    df_detail = df_raw[df_raw['name'] == selected_prod].copy()
-                    if not df_detail.empty and df_detail['ing_name'].notna().any():
-                        df_detail['每份用量'] = (df_detail['required_quantity'] / base_yield).round(2)
-                        df_detail['單一食材成本/份 ($)'] = (df_detail['ing_total_cost'] / base_yield).round(1)
-                        st.dataframe(df_detail[['ing_name', '每份用量', 'ing_unit', 'unit_price', '單一食材成本/份 ($)']].rename(columns={'ing_name': '食材名稱', 'ing_unit': '單位', 'unit_price': '進價 ($)'}), use_container_width=True, hide_index=True)
+                st.markdown(f"📊 **【 {selected_prod} 】1 ~ 3 份配方階梯定價對照表** (目標毛利率：{target_margin}%)")
+                st.dataframe(df_pricing, use_container_width=True, hide_index=True)
+                st.caption(f"💡 商業小提醒：當製作份數增加到 2 份或 3 份時，由於您在頁籤二設定的電費與時間並未翻倍（實現聯烤攤提），您會發現「單個應賣售價」明顯下降，且「預估最後總利潤」大幅跳水成長！這就是您設計限量多入組、團購優惠的最佳定價科學依據。")
