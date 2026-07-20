@@ -70,6 +70,11 @@ st.title("🍰 甜點工作室管理後台")
 st.sidebar.header("功能選單")
 page = st.sidebar.radio("請選擇頁面", ["庫存總覽", "訂單管理", "配方設定", "成本分析"])
 
+# 在 st.title 之後加入
+if st.button("🔄 同步 Google Sheets 最新資料"):
+    st.cache_data.clear() # 強制清除所有快取
+    st.rerun()           # 重新載入頁面
+    
 # ===== 頁面 1：庫存總覽 =====
 if page == "庫存總覽":
     st.subheader("📦 目前物料庫存")
