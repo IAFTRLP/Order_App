@@ -223,11 +223,16 @@ if page == "訂單管理":
     with col_list:
         st.markdown("### 📋 待處理訂單 (勾選計算)")
         
-        # 篩選待處理訂單並與產品資料 Merge
+        # 篩選待處理訂單並與產品資料 Merge (已修正 name_prod 問題)
         if not df_orders.empty:
             df_pending = df_orders[df_orders['status'] == '待處理']
-            df_display_orders = pd.merge(df_pending, df_products[['id', 'name', 'batch_yield', 'prep_days']], 
-                                         left_on='product_id', right_on='id', suffixes=('', '_prod'))
+            df_display_orders = pd.merge(
+                df_pending, 
+                df_products[['id', 'name', 'batch_yield', 'prep_days']], 
+                left_on='product_id', 
+                right_on='id', 
+                suffixes=('', '_prod')
+            ).rename(columns={'name': 'name_prod'}) # 強制命名確保不出錯
             df_display_orders = df_display_orders.sort_values(by='delivery_date')
         else:
             df_display_orders = pd.DataFrame()
@@ -245,6 +250,7 @@ if page == "訂單管理":
                     if edit_key not in st.session_state:
                         st.session_state[edit_key] = False
 
+                    # ----- 編輯模式 -----
                     if st.session_state[edit_key]:
                         st.markdown(f"**✏️ 修改訂單 #{row['id']}**")
                         with st.form(f"form_edit_{row['id']}"):
@@ -276,7 +282,6 @@ if page == "訂單管理":
                                     
                                     conn.update(spreadsheet=SPREADSHEET_URL, worksheet="Orders", data=df_orders)
                                     st.cache_data.clear()
-                                    
                                     st.session_state[edit_key] = False
                                     st.toast("✅ 訂單修改成功！")
                                     st.rerun()
@@ -284,6 +289,8 @@ if page == "訂單管理":
                                 if st.form_submit_button("❌ 取消", use_container_width=True):
                                     st.session_state[edit_key] = False
                                     st.rerun()
+                                    
+                    # ----- 一般顯示模式 -----
                     else:
                         try:
                             delivery_date_obj = datetime.strptime(str(row['delivery_date']), "%Y-%m-%d")
@@ -313,11 +320,15 @@ if page == "訂單管理":
                         
                         event_title = f"📋訂單：{row['name_prod']}({order_qty}{unit_str})"
                         event_details = f"顧客：{row['customer_name']}\n品項：{row['name_prod']}\n數量：{order_qty}{unit_str}\n\n⚠️ 此品項需提前 {prep_days} 天製作。\n📅 交貨日：{row['delivery_date']}"
+                        
+                        # 處理 urllib (若最上方未 import urllib.parse，這裡也能運作)
+                        import urllib.parse
                         gcal_url = (f"https://calendar.google.com/calendar/render?action=TEMPLATE"
                                     f"&text={urllib.parse.quote(event_title)}"
                                     f"&dates={prep_date_str}/{prep_date_str}" 
                                     f"&details={urllib.parse.quote(event_details)}")
                         
+                        # ----- 操作按鈕 -----
                         btn1, btn2, btn3, btn4 = st.columns(4)
                         with btn1: st.link_button("➕ 行事曆", gcal_url, use_container_width=True)
                         with btn2:
@@ -351,12 +362,12 @@ if page == "訂單管理":
                                     st.session_state[del_key] = False
                                     st.rerun()
 
+    # ----- 智慧備料與採購清單 -----
     with col_calc:
         st.markdown("### 🧮 智慧備料與採購清單")
         if not selected_orders:
             st.info("👈 請在左側勾選訂單，並可微調「實際製作量」，系統會為您精算物料！")
         else:
-            # Pandas 多表合併模擬 JOIN
             order_ids = list(selected_orders.keys())
             df_o = df_orders[df_orders['id'].isin(order_ids)][['id', 'product_id']].rename(columns={'id': 'order_id'})
             df_p = df_products[['id', 'batch_yield']].rename(columns={'id': 'product_id'})
@@ -381,6 +392,102 @@ if page == "訂單管理":
                     axis=1
                 )
                 st.dataframe(df_calc[['物料名稱', '總需求量', '目前庫存', '單位', '狀態']], use_container_width=True, hide_index=True)
+    
+    # ===== 新增功能：歷史訂單與利潤結算 =====
+    st.write("---")
+    with st.expander("✅ 已完成訂單與利潤紀錄", expanded=False):
+        df_completed = df_orders[df_orders['status'] == '已完成'].copy()
+        
+        if df_completed.empty:
+            st.info("目前還沒有已完成的訂單喔！完成訂單後會自動在這裡結算利潤。")
+        else:
+            import math
+            
+            # --- 1. 計算每個產品的單件開銷與單盒包裝費 ---
+            df_bom_price = pd.merge(df_bom, df_ingredients[['id', 'unit_price']], left_on='ingredient_id', right_on='id', how='left')
+            df_bom_price['required_quantity'] = pd.to_numeric(df_bom_price['required_quantity'], errors='coerce').fillna(0)
+            df_bom_price['unit_price'] = pd.to_numeric(df_bom_price['unit_price'], errors='coerce').fillna(0)
+            df_bom_price['ing_cost'] = df_bom_price['required_quantity'] * df_bom_price['unit_price']
+            prod_cost_sum = df_bom_price.groupby('product_id')['ing_cost'].sum().reset_index()
+            
+            prod_info = pd.merge(df_products, prod_cost_sum, left_on='id', right_on='product_id', how='left')
+            prod_info['ing_cost'] = prod_info['ing_cost'].fillna(0)
+            prod_info['batch_yield'] = pd.to_numeric(prod_info['batch_yield'], errors='coerce').fillna(1)
+            prod_info['price'] = pd.to_numeric(prod_info['price'], errors='coerce').fillna(0)
+            
+            # 確保有入數欄位，沒有的話預設為 1
+            if 'items_per_box' not in prod_info.columns:
+                prod_info['items_per_box'] = 1
+            prod_info['items_per_box'] = pd.to_numeric(prod_info['items_per_box'], errors='coerce').fillna(1)
+            
+            for col in ['hourly_wage', 'production_hours', 'overhead_cost']:
+                if col not in prod_info.columns: prod_info[col] = 0.0
+                else: prod_info[col] = pd.to_numeric(prod_info[col], errors='coerce').fillna(0.0)
+            
+            # 分離附加成本
+            base_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes', 'target_margin', 'items_per_box']
+            batch_calc_cols = ['hourly_wage', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3', 'product_id', 'ing_cost']
+            per_unit_cost_cols = [col for col in prod_info.columns if col not in base_cols + batch_calc_cols]
+            
+            for col in per_unit_cost_cols:
+                prod_info[col] = pd.to_numeric(prod_info[col], errors='coerce').fillna(0.0)
+            
+            # 計算基本單位開銷
+            prod_info['單份食材'] = prod_info.apply(lambda x: x['ing_cost'] / x['batch_yield'] if x['batch_yield'] > 0 else 0, axis=1)
+            prod_info['單份人事'] = prod_info.apply(lambda x: (x['production_hours'] * x['hourly_wage']) / x['batch_yield'] if x['batch_yield'] > 0 else 0, axis=1)
+            prod_info['單份水電'] = prod_info.apply(lambda x: x['overhead_cost'] / x['batch_yield'] if x['batch_yield'] > 0 else 0, axis=1)
+            prod_info['單盒包材附加'] = prod_info[per_unit_cost_cols].sum(axis=1)
+            
+            # --- 2. 結算歷史訂單 (套用盒數邏輯) ---
+            df_history = pd.merge(df_completed, prod_info[['id', 'name', 'price', '單份食材', '單份人事', '單份水電', '單盒包材附加', 'items_per_box']], left_on='product_id', right_on='id', how='left')
+            df_history['quantity'] = pd.to_numeric(df_history['quantity'], errors='coerce').fillna(0)
+            
+            df_history['總營收'] = df_history['quantity'] * df_history['price']
+            
+            # 🌟 核心：算出這筆訂單需要幾個包裝盒 (無條件進位)
+            df_history['實際盒數'] = df_history.apply(lambda x: math.ceil(x['quantity'] / x['items_per_box']) if x['items_per_box'] > 0 else 1, axis=1)
+            
+            # 🌟 總成本 = (食材+人事+水電) × 總顆數 + (單盒包裝費 × 實際盒數)
+            df_history['總成本'] = ((df_history['單份食材'] + df_history['單份人事'] + df_history['單份水電']) * df_history['quantity']) + (df_history['單盒包材附加'] * df_history['實際盒數'])
+            
+            df_history['淨利潤'] = df_history['總營收'] - df_history['總成本']
+            
+            df_display_history = df_history[['id_x', 'customer_name', 'delivery_date', 'name', 'quantity', '實際盒數', '總營收', '總成本', '淨利潤']].copy()
+            df_display_history.columns = ['訂單編號', '顧客名稱', '交貨日期', '品項', '總顆數', '消耗盒數', '總營收', '總成本(全含)', '淨利潤']
+            
+            df_display_history['總成本(全含)'] = df_display_history['總成本(全含)'].round(1)
+            df_display_history['淨利潤'] = df_display_history['淨利潤'].round(1)
+            
+            st.dataframe(df_display_history, use_container_width=True, hide_index=True)
+            
+            # --- 3. 顯示總結算數據 ---
+            total_revenue = df_display_history['總營收'].sum()
+            total_profit = df_display_history['淨利潤'].sum()
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📦 累積完成訂單數", f"{len(df_display_history)} 筆")
+            c2.metric("💰 累積總營收", f"${total_revenue:,.0f}")
+            c3.metric("📈 累積淨利潤 (全含)", f"${total_profit:,.0f}")
+            
+            # --- 4. 復原訂單狀態功能 ---
+            st.write("---")
+            st.markdown("#### ↩️ 復原訂單狀態")
+            col_rev1, col_rev2 = st.columns([2, 1])
+            with col_rev1:
+                rev_options = df_display_history.apply(lambda x: f"訂單 #{x['訂單編號']} - {x['顧客名稱']} ({x['品項']})", axis=1).tolist()
+                rev_id_list = df_display_history['訂單編號'].tolist()
+                selected_rev_index = st.selectbox("請選擇要退回「待處理」的訂單：", range(len(rev_options)), format_func=lambda i: rev_options[i])
+            with col_rev2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("↩️ 恢復為「待處理」", use_container_width=True):
+                    if rev_id_list:
+                        rev_target_id = rev_id_list[selected_rev_index]
+                        df_orders.loc[df_orders['id'] == rev_target_id, 'status'] = '待處理'
+                        conn.update(spreadsheet=SPREADSHEET_URL, worksheet="Orders", data=df_orders)
+                        st.cache_data.clear()
+                        st.toast(f"✅ 訂單 #{rev_target_id} 已恢復為待處理！")
+                        st.rerun()
+
 
 # ===== 頁面 3：配方設定 =====
 if page == "配方設定":
@@ -663,7 +770,7 @@ if page == "成本分析":
                 
                 c_wage, c_pack = st.columns(2)
                 with c_wage:
-                    val_hourly_wage = float(prod_row.get('hourly_wage', 183.0)) if pd.notna(prod_row.get('hourly_wage', 183.0)) else 183.0
+                    val_hourly_wage = float(prod_row.get('hourly_wage', 200.0)) if pd.notna(prod_row.get('hourly_wage', 200.0)) else 200.0
                     new_hourly_wage = st.number_input("基本時薪 ($/時)", min_value=0.0, value=val_hourly_wage, step=5.0)
                 with c_pack:
                     val_pack = float(prod_row.get('packaging_cost', 0.0)) if pd.notna(prod_row.get('packaging_cost', 0.0)) else 0.0
@@ -699,8 +806,14 @@ if page == "成本分析":
                     val_o3 = float(prod_row.get('overhead_cost_3', 0.0)) if pd.notna(prod_row.get('overhead_cost_3', 0.0)) else 0.0
                     new_o3 = st.number_input("水電雜支 (3份) ($)", min_value=0.0, value=val_o3, step=5.0)
                 
-                # 自動辨識自訂欄位
-                ignored_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3', 'hourly_wage', 'packaging_cost']
+                # 自動辨識自訂欄位 (已把 target_margin 和 items_per_box 加入忽略清單)
+                ignored_cols = [
+                    'id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 
+                    'production_minutes', 'production_hours', 'production_hours_2', 
+                    'production_hours_3', 'overhead_cost', 'overhead_cost_2', 
+                    'overhead_cost_3', 'hourly_wage', 'packaging_cost',
+                    'target_margin', 'items_per_box'  # 👈 關鍵修改：告訴系統忽略這兩個英文欄位
+                ]
                 custom_cols = [col for col in df_products.columns if col not in ignored_cols]
                 
                 new_custom_values = {}
@@ -754,66 +867,74 @@ if page == "成本分析":
                             st.error("⚠️ 此項目可能已經存在！")
 
     with tab_profit:
-        st.markdown("### 📊 甜點成本與利潤總覽")
+        st.markdown("### 🎯 多份數定價與利潤精算機")
+        
         if df_products.empty:
             st.warning("目前沒有甜點品項，請先到「配方設定」新增！")
         else:
-            base_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes']
+            import math
+            
+            # --- 隱藏的底層資料計算 ---
+            base_cols = ['id', 'name', 'price', 'prep_days', 'batch_yield', 'labor_cost', 'production_minutes', 'target_margin', 'items_per_box']
             batch_calc_cols = ['hourly_wage', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3']
             per_unit_cost_cols = [col for col in df_products.columns if col not in base_cols + batch_calc_cols]
             
-            # Pandas 合併模擬 JOIN (Products LEFT JOIN BOM LEFT JOIN Ingredients)
             m_pb = pd.merge(df_products, df_bom, left_on='id', right_on='product_id', how='left')
             df_i = df_ingredients[['id', 'name', 'unit_price', 'unit']].rename(columns={'id': 'ingredient_id', 'name': 'ing_name', 'unit': 'ing_unit'})
             df_raw = pd.merge(m_pb, df_i, on='ingredient_id', how='left')
             
-            all_numeric_cols = ['price', 'batch_yield', 'hourly_wage', 'production_hours', 'production_hours_2', 'production_hours_3', 'overhead_cost', 'overhead_cost_2', 'overhead_cost_3'] + per_unit_cost_cols
+            # 🚨 關鍵修正 1：將所有新欄位加入檢查清單，若為空白則自動補為 0
+            all_numeric_cols = ['price', 'batch_yield', 'prep_days', 'target_margin', 'items_per_box'] + batch_calc_cols + per_unit_cost_cols
             for col in all_numeric_cols:
                 if col in df_raw.columns:
                     df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0.0)
+            
+            # 確保產品名稱沒有空白
+            if 'name' in df_raw.columns:
+                df_raw['name'] = df_raw['name'].fillna("未命名")
             
             df_raw['ing_total_cost'] = df_raw['required_quantity'] * df_raw['unit_price']
             df_raw['ing_total_cost'] = df_raw['ing_total_cost'].fillna(0.0)
             
             group_keys = [col for col in df_products.columns if col not in ['labor_cost', 'production_minutes']]
-            df_product_ing = df_raw.groupby(group_keys)['ing_total_cost'].sum().reset_index()
             
-            df_product_ing['單份包材與附加總和'] = df_product_ing[per_unit_cost_cols].sum(axis=1)
-            df_product_ing['原物料成本/份'] = (df_product_ing['ing_total_cost'] / df_product_ing['batch_yield']).fillna(0.0)
-            df_product_ing['人事成本/份'] = ((df_product_ing['production_hours'] * df_product_ing['hourly_wage']) / df_product_ing['batch_yield']).fillna(0.0)
-            df_product_ing['水電折舊/份'] = (df_product_ing['overhead_cost'] / df_product_ing['batch_yield']).fillna(0.0)
+            # 🚨 關鍵修正 2：加上 dropna=False，要求系統保留所有包含空白欄位的甜點
+            df_product_ing = df_raw.groupby(group_keys, dropna=False)['ing_total_cost'].sum().reset_index()
+            df_product_ing['單盒包材與附加總和'] = df_product_ing[per_unit_cost_cols].sum(axis=1)
             
-            df_product_ing['總成本/份'] = df_product_ing['原物料成本/份'] + df_product_ing['人事成本/份'] + df_product_ing['水電折舊/份'] + df_product_ing['單份包材與附加總和']
-            
-            df_product_ing['原物料成本/份'] = df_product_ing['原物料成本/份'].round(1)
-            df_product_ing['人事成本/份'] = df_product_ing['人事成本/份'].round(1)
-            df_product_ing['其他附加總和/份'] = (df_product_ing['水電折舊/份'] + df_product_ing['單份包材與附加總和']).round(1)
-            df_product_ing['總成本/份'] = df_product_ing['總成本/份'].round(1)
-            df_product_ing['預估毛利/份'] = (df_product_ing['price'] - df_product_ing['總成本/份']).round(1)
-            
-            df_product_ing['毛利率 (%)'] = df_product_ing.apply(
-                lambda x: round((x['預估毛利/份'] / x['price'] * 100), 1) if x['price'] > 0 else 0.0, axis=1
-            )
-            
-            df_display = df_product_ing[['name', 'price', '原物料成本/份', '人事成本/份', '其他附加總和/份', '總成本/份', '預估毛利/份', '毛利率 (%)']].rename(columns={'name': '甜點名稱', 'price': '建議售價 ($)'})
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
-            
-            st.write("---")
-            st.markdown("### 🎯 多份數定價與利潤精算機")
-            
-            distinct_products = [n for n in df_product_ing['name'].unique() if pd.notna(n)]
+            # --- 精算機顯示區塊 ---
+            # 過濾掉可能為空的名字
+            distinct_products = [n for n in df_product_ing['name'].unique() if pd.notna(n) and n != "未命名"]
             
             if distinct_products:
-                c_sel, c_margin = st.columns(2)
-                with c_sel: selected_prod = st.selectbox("🔍 1. 請選擇甜點品項", distinct_products, key="pricing_calc_prod")
-                with c_margin: target_margin = st.slider("🎯 2. 設定目標毛利率 (%)", min_value=10, max_value=90, value=60, step=5)
+                c_sel, c_margin, c_box = st.columns([1.5, 1.5, 1])
+                with c_sel: 
+                    selected_prod = st.selectbox("🔍 1. 請選擇甜點品項", distinct_products, key="pricing_calc_prod")
                 
+                idx = df_products.index[df_products['name'] == selected_prod].tolist()[0]
+                default_margin = float(df_products.at[idx, 'target_margin']) if 'target_margin' in df_products.columns and pd.notna(df_products.at[idx, 'target_margin']) else 60.0
+                default_box = int(df_products.at[idx, 'items_per_box']) if 'items_per_box' in df_products.columns and pd.notna(df_products.at[idx, 'items_per_box']) else 1
+                
+                with c_margin: 
+                    target_margin = st.slider("🎯 2. 設定目標毛利率 (%)", min_value=10, max_value=90, value=int(default_margin), step=5)
+                with c_box: 
+                    items_per_box = st.number_input("📦 3. 每盒入數", min_value=1, value=default_box, step=1)
+                
+                if st.button(f"💾 儲存【{selected_prod}】的毛利與包裝設定", use_container_width=True):
+                    df_products.at[idx, 'target_margin'] = target_margin
+                    df_products.at[idx, 'items_per_box'] = items_per_box
+                    conn.update(spreadsheet=SPREADSHEET_URL, worksheet="Products", data=df_products)
+                    st.cache_data.clear()
+                    st.toast(f"✅ {selected_prod} 的專屬設定已成功儲存！", icon="💾")
+                    st.rerun()
+
                 prod_data = df_product_ing[df_product_ing['name'] == selected_prod].iloc[0]
-                base_yield = prod_data['batch_yield']
+                base_yield = prod_data['batch_yield'] if prod_data['batch_yield'] > 0 else 1
                 pricing_rows = []
                 
                 for batches in [1, 2, 3]:
                     total_items = int(base_yield * batches)
+                    total_boxes = math.ceil(total_items / items_per_box)
                     
                     if batches == 1:
                         batch_hours = prod_data['production_hours']
@@ -827,26 +948,26 @@ if page == "成本分析":
                     
                     ing_cost = round(prod_data['ing_total_cost'] * batches, 1)
                     labor_cost = round(batch_hours * prod_data['hourly_wage'], 1)
-                    extra_cost = round(batch_overhead + (prod_data['單份包材與附加總和'] * total_items), 1)
+                    extra_cost = round(batch_overhead + (prod_data['單盒包材與附加總和'] * total_boxes), 1)
                     total_cost = round(ing_cost + labor_cost + extra_cost, 1)
                     
                     suggested_total_revenue = round(total_cost / (1 - target_margin / 100), 0)
-                    suggested_unit_price = round(suggested_total_revenue / total_items, 0) if total_items > 0 else 0
+                    suggested_box_price = round(suggested_total_revenue / total_boxes, 0) if total_boxes > 0 else 0
                     total_profit = round(suggested_total_revenue - total_cost, 0)
                     
                     pricing_rows.append({
                         "製作規模": f"製作 {batches} 份配方",
-                        "預計總產出": f"{total_items} 個/份",
+                        "總產出 / 總盒數": f"{total_items} 個 ({total_boxes} 盒)",
                         "食材總成本": f"$ {ing_cost}",
                         "人事總成本": f"$ {labor_cost}",
                         "附加總成本": f"$ {extra_cost}",
                         "總成本 (A)": f"$ {total_cost}",
                         "應賣總金額 (B)": f"$ {int(suggested_total_revenue)}",
-                        "單個應賣售價": f"$ {int(suggested_unit_price)}",
+                        f"單盒建議售價 ({items_per_box}入)": f"$ {int(suggested_box_price)}",
                         "預估最後總利潤 (B-A)": f"$ {int(total_profit)}"
                     })
                 
                 df_pricing = pd.DataFrame(pricing_rows)
                 st.write("")
-                st.markdown(f"📊 **【 {selected_prod} 】1 ~ 3 份配方階梯定價對照表** (目標毛利率：{target_margin}%)")
+                st.markdown(f"📊 **【 {selected_prod} 】定價對照表** (目標毛利：{target_margin}% | 包裝規格：{items_per_box} 入/盒)")
                 st.dataframe(df_pricing, use_container_width=True, hide_index=True)
